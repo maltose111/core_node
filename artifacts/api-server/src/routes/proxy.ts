@@ -789,7 +789,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
         const modelMax = CLAUDE_MODEL_MAX[actualModel] ?? 32000;
         const defaultMaxTokens = thinkingEnabled ? Math.max(modelMax, 32000) : modelMax;
         const client = makeLocalAnthropic();
-        result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, tools, toolChoice: tool_choice, startTime });
+        result = await handleClaude({ req, res, client, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens ?? defaultMaxTokens, thinking: thinkingEnabled, thinkingVisible, tools, toolChoice: tool_choice, startTime });
       } else if (isGeminiModel) {
         const thinkingVisible = selectedModel.endsWith("-thinking-visible");
         const thinkingEnabled = thinkingVisible || selectedModel.endsWith("-thinking");
@@ -1599,7 +1599,7 @@ async function handleGemini({
 }
 
 async function handleClaude({
-  req, res, client, model, messages, stream, maxTokens, thinking = false, tools, toolChoice, startTime,
+  req, res, client, model, messages, stream, maxTokens, thinking = false, thinkingVisible = false, tools, toolChoice, startTime,
 }: {
   req: Request;
   res: Response;
@@ -1609,6 +1609,7 @@ async function handleClaude({
   stream: boolean;
   maxTokens: number;
   thinking?: boolean;
+  thinkingVisible?: boolean;
   tools?: OAITool[];
   toolChoice?: unknown;
   startTime: number;
@@ -1665,7 +1666,6 @@ async function handleClaude({
 
       let inputTokens = 0;
       let outputTokens = 0;
-      let thinkingStarted = false;
       let ttftMs: number | undefined;
       // Track current tool_use block index for streaming
       let currentToolIndex = -1;
@@ -1680,35 +1680,23 @@ async function handleClaude({
         } else if (event.type === "content_block_start") {
           const block = event.content_block;
 
-          if (block.type === "thinking") {
-            if (!thinkingStarted) {
-              thinkingStarted = true;
-              writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: "<thinking>\n" }, finish_reason: null }] })}\n\n`);
-            }
-          } else if (block.type === "tool_use") {
-            if (thinkingStarted) {
-              writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: "\n</thinking>\n\n" }, finish_reason: null }] })}\n\n`);
-              thinkingStarted = false;
-            }
+          if (block.type === "tool_use") {
             // Map this content block index to tool_calls array index
             currentToolIndex = toolCallCount++;
             toolIndexMap.set(event.index, currentToolIndex);
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
             // Send tool_call start chunk
             writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { tool_calls: [{ index: currentToolIndex, id: block.id, type: "function", function: { name: block.name, arguments: "" } }] }, finish_reason: null }] })}\n\n`);
-          } else if (block.type === "text") {
-            if (thinkingStarted) {
-              writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: "\n</thinking>\n\n" }, finish_reason: null }] })}\n\n`);
-              thinkingStarted = false;
-            }
           }
 
         } else if (event.type === "content_block_delta") {
           const delta = event.delta;
 
           if (delta.type === "thinking_delta") {
-            const cleaned = delta.thinking.replace(/<\/?think>/g, "");
-            if (cleaned) writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: cleaned }, finish_reason: null }] })}\n\n`);
+            if (thinkingVisible) {
+              const cleaned = delta.thinking.replace(/<\/?think>/g, "");
+              if (cleaned) writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { reasoning_content: cleaned }, finish_reason: null }] })}\n\n`);
+            }
           } else if (delta.type === "text_delta") {
             if (ttftMs === undefined) ttftMs = Date.now() - startTime;
             writeAndFlush(res, `data: ${JSON.stringify({ id: msgId, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }] })}\n\n`);
@@ -1752,12 +1740,13 @@ async function handleClaude({
     }
 
     const textParts: string[] = [];
+    const reasoningParts: string[] = [];
     const toolCalls: OAIToolCall[] = [];
 
     for (const block of result.content) {
       if (block.type === "thinking") {
         const rawThinking = (block as { type: "thinking"; thinking: string }).thinking.replace(/<\/?think>/g, "");
-        textParts.push(`<thinking>\n${rawThinking}\n</thinking>`);
+        reasoningParts.push(rawThinking);
       } else if (block.type === "text") {
         textParts.push((block as { type: "text"; text: string }).text);
       } else if (block.type === "tool_use") {
@@ -1774,6 +1763,7 @@ async function handleClaude({
     }
 
     const text = textParts.join("\n\n");
+    const reasoning = reasoningParts.join("\n\n");
     const stopReason = result.stop_reason;
     const finishReason = stopReason === "tool_use" ? "tool_calls" : (stopReason ?? "stop");
 
@@ -1786,6 +1776,7 @@ async function handleClaude({
         index: 0,
         message: {
           role: "assistant",
+          ...(thinkingVisible && reasoning ? { reasoning_content: reasoning } : {}),
           content: text || null,
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         },
