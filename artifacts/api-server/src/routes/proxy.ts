@@ -798,7 +798,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
           : thinkingEnabled
             ? selectedModel.replace(/-thinking$/, "")
             : selectedModel;
-        result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, startTime });
+        result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, thinkingVisible, startTime });
       } else if (isOpenRouterModel) {
         const client = makeLocalOpenRouter();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
@@ -1416,20 +1416,31 @@ async function handleOpenAI({
 // Gemini raw API types (used by direct fetch implementation)
 // ---------------------------------------------------------------------------
 
-interface GeminiPart { text: string }
+interface GeminiPart { text: string; thought?: boolean }
 interface GeminiContent { role: string; parts: GeminiPart[] }
 interface GeminiCandidate {
   content?: GeminiContent;
   finishReason?: string;
 }
-interface GeminiUsage { promptTokenCount?: number; candidatesTokenCount?: number }
+interface GeminiUsage { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number }
 interface GeminiResponse {
   candidates?: GeminiCandidate[];
   usageMetadata?: GeminiUsage;
 }
 
+/** Extract text from Gemini parts, optionally including thought summaries. */
+function extractGeminiText(parts: GeminiPart[], thinkingVisible: boolean): string {
+  if (!parts.length) return "";
+  const thoughtParts = parts.filter((p) => p.thought);
+  const answerParts = parts.filter((p) => !p.thought);
+  const answer = answerParts.map((p) => p.text).join("");
+  if (!thinkingVisible || !thoughtParts.length) return answer;
+  const thoughts = thoughtParts.map((p) => p.text).join("");
+  return `<think>\n${thoughts}\n</think>\n\n${answer}`;
+}
+
 async function handleGemini({
-  req, res, model, messages, stream, maxTokens, thinking = false, startTime,
+  req, res, model, messages, stream, maxTokens, thinking = false, thinkingVisible = false, startTime,
 }: {
   req: Request;
   res: Response;
@@ -1438,6 +1449,7 @@ async function handleGemini({
   stream: boolean;
   maxTokens?: number;
   thinking?: boolean;
+  thinkingVisible?: boolean;
   startTime: number;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
   const { apiKey, baseUrl } = makeLocalGemini();
@@ -1468,7 +1480,10 @@ async function handleGemini({
   const generationConfig: Record<string, unknown> = {};
   if (maxTokens) generationConfig.maxOutputTokens = maxTokens;
   if (thinking) {
-    generationConfig.thinkingConfig = { thinkingBudget: maxTokens ? Math.min(maxTokens, 32768) : 16384 };
+    generationConfig.thinkingConfig = {
+      thinkingBudget: maxTokens ? Math.min(maxTokens, 32768) : 16384,
+      includeThoughts: thinkingVisible,
+    };
   }
 
   const reqBody: Record<string, unknown> = { contents, generationConfig };
@@ -1497,6 +1512,8 @@ async function handleGemini({
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      let thoughtBuf = "";
+      let thoughtEmitted = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1510,22 +1527,39 @@ async function handleGemini({
           if (!raw || raw === "[DONE]") continue;
           let chunk: GeminiResponse;
           try { chunk = JSON.parse(raw) as GeminiResponse; } catch { continue; }
-          const text = chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-          if (ttftMs === undefined && text) ttftMs = Date.now() - startTime;
+          const parts = chunk.candidates?.[0]?.content?.parts ?? [];
           if (chunk.usageMetadata) {
             promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
             completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
           }
-          const oaiChunk = {
-            id: chatId, object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000), model,
-            choices: [{
-              index: 0,
-              delta: { content: text },
-              finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
-            }],
-          };
-          writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
+          for (const part of parts) {
+            if (part.thought) {
+              thoughtBuf += part.text;
+              continue;
+            }
+            // First answer part — emit buffered thoughts block if visible
+            if (thinkingVisible && thoughtBuf && !thoughtEmitted) {
+              const thinkChunk = {
+                id: chatId, object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta: { content: `<think>\n${thoughtBuf}\n</think>\n\n` }, finish_reason: null }],
+              };
+              writeAndFlush(res, `data: ${JSON.stringify(thinkChunk)}\n\n`);
+              thoughtEmitted = true;
+            }
+            const text = part.text ?? "";
+            if (ttftMs === undefined && text) ttftMs = Date.now() - startTime;
+            const oaiChunk = {
+              id: chatId, object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000), model,
+              choices: [{
+                index: 0,
+                delta: { content: text },
+                finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
+              }],
+            };
+            writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
+          }
         }
       }
 
@@ -1540,7 +1574,7 @@ async function handleGemini({
       const fallbackUrl = `${baseUrl}/models/${model}:generateContent`;
       const fallbackResp = await fetch(fallbackUrl, { method: "POST", headers, body: JSON.stringify(reqBody) });
       const fallbackJson = await fallbackResp.json() as GeminiResponse;
-      const text = fallbackJson.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      const text = extractGeminiText(fallbackJson.candidates?.[0]?.content?.parts ?? [], thinkingVisible);
       const pTokens = fallbackJson.usageMetadata?.promptTokenCount ?? 0;
       const cTokens = fallbackJson.usageMetadata?.candidatesTokenCount ?? 0;
       const json = {
@@ -1559,7 +1593,7 @@ async function handleGemini({
       throw new Error(`Gemini error ${upstream.status}: ${errText}`);
     }
     const data = await upstream.json() as GeminiResponse;
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const text = extractGeminiText(data.candidates?.[0]?.content?.parts ?? [], thinkingVisible);
     const promptTokens = data.usageMetadata?.promptTokenCount ?? 0;
     const completionTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
 
