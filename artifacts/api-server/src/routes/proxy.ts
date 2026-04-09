@@ -1,7 +1,6 @@
 import { Router, type IRouter, type Request, type Response } from "express";
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
-import { GoogleGenAI } from "@google/genai";
 import { readJson, writeJson } from "../lib/cloudPersist";
 import { getSillyTavernMode } from "./settings";
 
@@ -308,7 +307,7 @@ function makeLocalAnthropic(): Anthropic {
   return new Anthropic({ apiKey, baseURL });
 }
 
-function makeLocalGemini(): GoogleGenAI {
+function makeLocalGemini(): { apiKey: string; baseUrl: string } {
   const apiKey = process.env.AI_INTEGRATIONS_GEMINI_API_KEY;
   const baseUrl = process.env.AI_INTEGRATIONS_GEMINI_BASE_URL;
   if (!apiKey || !baseUrl) {
@@ -316,7 +315,7 @@ function makeLocalGemini(): GoogleGenAI {
       "Gemini integration is not configured. Please add the Gemini integration in Replit (Tools → Integrations) to use Gemini models."
     );
   }
-  return new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "", baseUrl } });
+  return { apiKey, baseUrl: baseUrl.replace(/\/$/, "") };
 }
 
 function makeLocalOpenRouter(): OpenAI {
@@ -1413,6 +1412,22 @@ async function handleOpenAI({
   }
 }
 
+// ---------------------------------------------------------------------------
+// Gemini raw API types (used by direct fetch implementation)
+// ---------------------------------------------------------------------------
+
+interface GeminiPart { text: string }
+interface GeminiContent { role: string; parts: GeminiPart[] }
+interface GeminiCandidate {
+  content?: GeminiContent;
+  finishReason?: string;
+}
+interface GeminiUsage { promptTokenCount?: number; candidatesTokenCount?: number }
+interface GeminiResponse {
+  candidates?: GeminiCandidate[];
+  usageMetadata?: GeminiUsage;
+}
+
 async function handleGemini({
   req, res, model, messages, stream, maxTokens, thinking = false, startTime,
 }: {
@@ -1425,10 +1440,10 @@ async function handleGemini({
   thinking?: boolean;
   startTime: number;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
-  const client = makeLocalGemini();
+  const { apiKey, baseUrl } = makeLocalGemini();
 
   let systemInstruction: string | undefined;
-  const contents: { role: string; parts: { text: string }[] }[] = [];
+  const contents: GeminiContent[] = [];
 
   for (const msg of messages) {
     const textContent = typeof msg.content === "string"
@@ -1450,65 +1465,84 @@ async function handleGemini({
     contents.push({ role: "user", parts: [{ text: " " }] });
   }
 
-  const config: Record<string, unknown> = {};
-  if (maxTokens) config.maxOutputTokens = maxTokens;
+  const generationConfig: Record<string, unknown> = {};
+  if (maxTokens) generationConfig.maxOutputTokens = maxTokens;
   if (thinking) {
-    config.thinkingConfig = { thinkingBudget: maxTokens ? Math.min(maxTokens, 32768) : 16384 };
+    generationConfig.thinkingConfig = { thinkingBudget: maxTokens ? Math.min(maxTokens, 32768) : 16384 };
   }
 
+  const reqBody: Record<string, unknown> = { contents, generationConfig };
+  if (systemInstruction) reqBody.systemInstruction = { parts: [{ text: systemInstruction }] };
+
+  const headers = {
+    "Content-Type": "application/json",
+    "x-goog-api-key": apiKey,
+  };
+
   if (stream) {
+    const url = `${baseUrl}/models/${model}:streamGenerateContent?alt=sse`;
+    setSseHeaders(res);
+    let ttftMs: number | undefined;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    const chatId = `chatcmpl-${Date.now()}`;
+
     try {
-      setSseHeaders(res);
-      let ttftMs: number | undefined;
-      let promptTokens = 0;
-      let completionTokens = 0;
-      const chatId = `chatcmpl-${Date.now()}`;
+      const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(reqBody) });
+      if (!upstream.ok || !upstream.body) {
+        const errText = await upstream.text().catch(() => "");
+        throw new Error(`Gemini stream error ${upstream.status}: ${errText}`);
+      }
 
-      const response = await client.models.generateContentStream({
-        model,
-        contents,
-        config: {
-          ...config,
-          ...(systemInstruction ? { systemInstruction } : {}),
-        },
-      });
+      const reader = upstream.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
 
-      for await (const chunk of response) {
-        const text = chunk.text ?? "";
-        if (ttftMs === undefined && text) {
-          ttftMs = Date.now() - startTime;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim();
+          if (!raw || raw === "[DONE]") continue;
+          let chunk: GeminiResponse;
+          try { chunk = JSON.parse(raw) as GeminiResponse; } catch { continue; }
+          const text = chunk.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+          if (ttftMs === undefined && text) ttftMs = Date.now() - startTime;
+          if (chunk.usageMetadata) {
+            promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
+            completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
+          }
+          const oaiChunk = {
+            id: chatId, object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000), model,
+            choices: [{
+              index: 0,
+              delta: { content: text },
+              finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
+            }],
+          };
+          writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
         }
-        if (chunk.usageMetadata) {
-          promptTokens = chunk.usageMetadata.promptTokenCount ?? 0;
-          completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
-        }
-        const oaiChunk = {
-          id: chatId,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model,
-          choices: [{
-            index: 0,
-            delta: { content: text },
-            finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
-          }],
-        };
-        writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
       }
 
       writeAndFlush(res, "data: [DONE]\n\n");
       res.end();
       return { promptTokens, completionTokens, ttftMs };
     } catch (streamErr) {
-      if (res.headersSent || !routingSettings.fakeStream) throw streamErr;
-      req.log.warn({ err: streamErr }, "Gemini streaming failed, falling back to fake-stream");
-      const response = await client.models.generateContent({
-        model, contents,
-        config: { ...config, ...(systemInstruction ? { systemInstruction } : {}) },
-      });
-      const text = response.text ?? "";
-      const pTokens = response.usageMetadata?.promptTokenCount ?? 0;
-      const cTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+      if (res.headersSent) throw streamErr;
+      if (!routingSettings.fakeStream) throw streamErr;
+      req.log.warn({ err: streamErr }, "Gemini streaming failed, falling back to non-stream");
+
+      const fallbackUrl = `${baseUrl}/models/${model}:generateContent`;
+      const fallbackResp = await fetch(fallbackUrl, { method: "POST", headers, body: JSON.stringify(reqBody) });
+      const fallbackJson = await fallbackResp.json() as GeminiResponse;
+      const text = fallbackJson.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      const pTokens = fallbackJson.usageMetadata?.promptTokenCount ?? 0;
+      const cTokens = fallbackJson.usageMetadata?.candidatesTokenCount ?? 0;
       const json = {
         id: `chatcmpl-${Date.now()}`, object: "chat.completion",
         created: Math.floor(Date.now() / 1000), model,
@@ -1518,34 +1552,24 @@ async function handleGemini({
       return fakeStreamResponse(res, json as unknown as Record<string, unknown>, startTime);
     }
   } else {
-    const response = await client.models.generateContent({
-      model,
-      contents,
-      config: {
-        ...config,
-        ...(systemInstruction ? { systemInstruction } : {}),
-      },
-    });
-
-    const text = response.text ?? "";
-    const promptTokens = response.usageMetadata?.promptTokenCount ?? 0;
-    const completionTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+    const url = `${baseUrl}/models/${model}:generateContent`;
+    const upstream = await fetch(url, { method: "POST", headers, body: JSON.stringify(reqBody) });
+    if (!upstream.ok) {
+      const errText = await upstream.text().catch(() => "");
+      throw new Error(`Gemini error ${upstream.status}: ${errText}`);
+    }
+    const data = await upstream.json() as GeminiResponse;
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const promptTokens = data.usageMetadata?.promptTokenCount ?? 0;
+    const completionTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
 
     res.json({
       id: `chatcmpl-${Date.now()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
       model,
-      choices: [{
-        index: 0,
-        message: { role: "assistant", content: text },
-        finish_reason: "stop",
-      }],
-      usage: {
-        prompt_tokens: promptTokens,
-        completion_tokens: completionTokens,
-        total_tokens: promptTokens + completionTokens,
-      },
+      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
     });
     return { promptTokens, completionTokens };
   }
