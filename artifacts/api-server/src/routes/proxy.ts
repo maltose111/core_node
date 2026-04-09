@@ -1428,15 +1428,11 @@ interface GeminiResponse {
   usageMetadata?: GeminiUsage;
 }
 
-/** Extract text from Gemini parts, optionally including thought summaries. */
-function extractGeminiText(parts: GeminiPart[], thinkingVisible: boolean): string {
-  if (!parts.length) return "";
-  const thoughtParts = parts.filter((p) => p.thought);
-  const answerParts = parts.filter((p) => !p.thought);
-  const answer = answerParts.map((p) => p.text).join("");
-  if (!thinkingVisible || !thoughtParts.length) return answer;
-  const thoughts = thoughtParts.map((p) => p.text).join("");
-  return `<think>\n${thoughts}\n</think>\n\n${answer}`;
+/** Extract answer text and reasoning text from Gemini parts. */
+function extractGeminiParts(parts: GeminiPart[]): { answer: string; reasoning: string } {
+  const answer = parts.filter((p) => !p.thought).map((p) => p.text).join("");
+  const reasoning = parts.filter((p) => p.thought).map((p) => p.text).join("");
+  return { answer, reasoning };
 }
 
 async function handleGemini({
@@ -1512,9 +1508,6 @@ async function handleGemini({
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
-      let thoughtBuf = "";
-      let thoughtEmitted = false;
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -1533,29 +1526,21 @@ async function handleGemini({
             completionTokens = chunk.usageMetadata.candidatesTokenCount ?? 0;
           }
           for (const part of parts) {
-            if (part.thought) {
-              thoughtBuf += part.text;
-              continue;
-            }
-            // First answer part — emit buffered thoughts block if visible
-            if (thinkingVisible && thoughtBuf && !thoughtEmitted) {
-              const thinkChunk = {
-                id: chatId, object: "chat.completion.chunk",
-                created: Math.floor(Date.now() / 1000), model,
-                choices: [{ index: 0, delta: { content: `<think>\n${thoughtBuf}\n</think>\n\n` }, finish_reason: null }],
-              };
-              writeAndFlush(res, `data: ${JSON.stringify(thinkChunk)}\n\n`);
-              thoughtEmitted = true;
-            }
+            const isThought = !!part.thought;
             const text = part.text ?? "";
-            if (ttftMs === undefined && text) ttftMs = Date.now() - startTime;
+            if (!text) continue;
+            if (isThought && !thinkingVisible) continue;
+            if (ttftMs === undefined) ttftMs = Date.now() - startTime;
+            const delta: Record<string, string> = isThought
+              ? { reasoning_content: text }
+              : { content: text };
             const oaiChunk = {
               id: chatId, object: "chat.completion.chunk",
               created: Math.floor(Date.now() / 1000), model,
               choices: [{
                 index: 0,
-                delta: { content: text },
-                finish_reason: chunk.candidates?.[0]?.finishReason === "STOP" ? "stop" : null,
+                delta,
+                finish_reason: (!isThought && chunk.candidates?.[0]?.finishReason === "STOP") ? "stop" : null,
               }],
             };
             writeAndFlush(res, `data: ${JSON.stringify(oaiChunk)}\n\n`);
@@ -1574,13 +1559,15 @@ async function handleGemini({
       const fallbackUrl = `${baseUrl}/models/${model}:generateContent`;
       const fallbackResp = await fetch(fallbackUrl, { method: "POST", headers, body: JSON.stringify(reqBody) });
       const fallbackJson = await fallbackResp.json() as GeminiResponse;
-      const text = extractGeminiText(fallbackJson.candidates?.[0]?.content?.parts ?? [], thinkingVisible);
+      const { answer: fbAnswer, reasoning: fbReasoning } = extractGeminiParts(fallbackJson.candidates?.[0]?.content?.parts ?? []);
       const pTokens = fallbackJson.usageMetadata?.promptTokenCount ?? 0;
       const cTokens = fallbackJson.usageMetadata?.candidatesTokenCount ?? 0;
+      const msg: Record<string, string> = { role: "assistant", content: fbAnswer };
+      if (thinkingVisible && fbReasoning) msg.reasoning_content = fbReasoning;
       const json = {
         id: `chatcmpl-${Date.now()}`, object: "chat.completion",
         created: Math.floor(Date.now() / 1000), model,
-        choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+        choices: [{ index: 0, message: msg, finish_reason: "stop" }],
         usage: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: pTokens + cTokens },
       };
       return fakeStreamResponse(res, json as unknown as Record<string, unknown>, startTime);
@@ -1593,16 +1580,18 @@ async function handleGemini({
       throw new Error(`Gemini error ${upstream.status}: ${errText}`);
     }
     const data = await upstream.json() as GeminiResponse;
-    const text = extractGeminiText(data.candidates?.[0]?.content?.parts ?? [], thinkingVisible);
+    const { answer, reasoning } = extractGeminiParts(data.candidates?.[0]?.content?.parts ?? []);
     const promptTokens = data.usageMetadata?.promptTokenCount ?? 0;
     const completionTokens = data.usageMetadata?.candidatesTokenCount ?? 0;
+    const message: Record<string, string> = { role: "assistant", content: answer };
+    if (thinkingVisible && reasoning) message.reasoning_content = reasoning;
 
     res.json({
       id: `chatcmpl-${Date.now()}`,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
       model,
-      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      choices: [{ index: 0, message, finish_reason: "stop" }],
       usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
     });
     return { promptTokens, completionTokens };
