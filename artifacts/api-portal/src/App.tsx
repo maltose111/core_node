@@ -85,9 +85,12 @@ const OPENROUTER_MODELS: ModelEntry[] = [
   { id: "qwen/qwen3.5-122b-a10b", label: "Qwen 3.5 122B", provider: "openrouter", desc: "Alibaba 大参数旗舰" },
   { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 Gemini" },
   { id: "anthropic/claude-opus-4.6", label: "Claude Opus 4.6 (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 Claude", badge: "tools" },
+  { id: "anthropic/claude-opus-4.6-fast", label: "Claude Opus 4.6 Fast (OR)", provider: "openrouter", desc: "Claude Opus 4.6 高速版", badge: "tools" },
   { id: "cohere/command-a", label: "Command A", provider: "openrouter", desc: "Cohere 企业级模型", badge: "tools" },
   { id: "amazon/nova-premier-v1", label: "Nova Premier V1", provider: "openrouter", desc: "Amazon 旗舰多模态" },
   { id: "baidu/ernie-4.5-300b-a47b", label: "ERNIE 4.5 300B", provider: "openrouter", desc: "百度 MoE 大参数模型" },
+  { id: "z-ai/glm-5.1", label: "GLM 5.1", provider: "openrouter", desc: "智谱 AI 旗舰模型" },
+  { id: "qwen/qwen3.6-plus", label: "Qwen 3.6 Plus", provider: "openrouter", desc: "Alibaba Qwen 3.6 增强版" },
 ];
 
 // ---------------------------------------------------------------------------
