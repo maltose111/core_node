@@ -39,6 +39,7 @@ const OPENROUTER_FEATURED = [
   "google/gemini-2.5-pro", "anthropic/claude-opus-4.6", "anthropic/claude-opus-4.6-fast",
   "cohere/command-a", "amazon/nova-premier-v1", "baidu/ernie-4.5-300b-a47b",
   "z-ai/glm-5.1", "qwen/qwen3.6-plus",
+  "openai/gpt-5.4", "openai/gpt-5.4-pro", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano",
 ];
 
 const OPENAI_MODELS = OPENAI_CHAT_MODELS.map((id) => ({ id, description: "OpenAI model" }));

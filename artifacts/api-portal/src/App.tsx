@@ -91,6 +91,10 @@ const OPENROUTER_MODELS: ModelEntry[] = [
   { id: "baidu/ernie-4.5-300b-a47b", label: "ERNIE 4.5 300B", provider: "openrouter", desc: "百度 MoE 大参数模型" },
   { id: "z-ai/glm-5.1", label: "GLM 5.1", provider: "openrouter", desc: "智谱 AI 旗舰模型" },
   { id: "qwen/qwen3.6-plus", label: "Qwen 3.6 Plus", provider: "openrouter", desc: "Alibaba Qwen 3.6 增强版" },
+  { id: "openai/gpt-5.4", label: "GPT-5.4 (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4", badge: "tools" },
+  { id: "openai/gpt-5.4-pro", label: "GPT-5.4 Pro (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4 Pro", badge: "tools" },
+  { id: "openai/gpt-5.4-mini", label: "GPT-5.4 Mini (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4 Mini" },
+  { id: "openai/gpt-5.4-nano", label: "GPT-5.4 Nano (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4 Nano" },
 ];
 
 // ---------------------------------------------------------------------------
