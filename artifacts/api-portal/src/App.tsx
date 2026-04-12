@@ -15,7 +15,7 @@ interface ModelEntry {
   label: string;
   provider: Provider;
   desc: string;
-  badge?: "thinking" | "thinking-visible" | "tools" | "reasoning";
+  badge?: "thinking" | "thinking-visible" | "tools" | "reasoning" | "image";
   context?: string;
 }
 
@@ -95,6 +95,11 @@ const OPENROUTER_MODELS: ModelEntry[] = [
   { id: "openai/gpt-5.4-pro", label: "GPT-5.4 Pro (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4 Pro", badge: "tools" },
   { id: "openai/gpt-5.4-mini", label: "GPT-5.4 Mini (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4 Mini" },
   { id: "openai/gpt-5.4-nano", label: "GPT-5.4 Nano (OR)", provider: "openrouter", desc: "通过 OpenRouter 的 GPT-5.4 Nano" },
+  { id: "openai/gpt-5-image", label: "GPT-5 Image (OR)", provider: "openrouter", desc: "文字+图片 → 生成图片", badge: "image" },
+  { id: "openai/gpt-5-image-mini", label: "GPT-5 Image Mini (OR)", provider: "openrouter", desc: "文字+图片 → 生成图片", badge: "image" },
+  { id: "google/gemini-3.1-flash-image-preview", label: "Gemini 3.1 Flash Image (OR)", provider: "openrouter", desc: "文字+图片 → 生成图片", badge: "image" },
+  { id: "google/gemini-3-pro-image-preview", label: "Gemini 3 Pro Image (OR)", provider: "openrouter", desc: "文字+图片 → 生成图片", badge: "image" },
+  { id: "google/gemini-2.5-flash-image", label: "Gemini 2.5 Flash Image (OR)", provider: "openrouter", desc: "文字+图片 → 生成图片", badge: "image" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -176,8 +181,9 @@ function Badge({ variant }: { variant: string }) {
     "thinking-visible": { color: "#34d399", bg: "rgba(52,211,153,0.12)", border: "rgba(52,211,153,0.3)" },
     tools: { color: "#fbbf24", bg: "rgba(251,191,36,0.1)", border: "rgba(251,191,36,0.3)" },
     reasoning: { color: "#f472b6", bg: "rgba(244,114,182,0.1)", border: "rgba(244,114,182,0.3)" },
+    image: { color: "#38bdf8", bg: "rgba(56,189,248,0.1)", border: "rgba(56,189,248,0.3)" },
   };
-  const labels: Record<string, string> = { thinking: "思考", "thinking-visible": "思考可见", tools: "工具", reasoning: "推理" };
+  const labels: Record<string, string> = { thinking: "思考", "thinking-visible": "思考可见", tools: "工具", reasoning: "推理", image: "图片" };
   const s = styles[variant] ?? styles.tools;
   return (
     <span style={{
