@@ -37,12 +37,23 @@ const OPENROUTER_FEATURED = [
   "deepseek/deepseek-v3.2", "deepseek/deepseek-r1", "deepseek/deepseek-r1-0528",
   "mistralai/mistral-small-2603", "qwen/qwen3.5-122b-a10b",
   "google/gemini-2.5-pro", "anthropic/claude-opus-4.6", "anthropic/claude-opus-4.6-fast",
+  "anthropic/claude-opus-4.7", "anthropic/claude-opus-4.7-fast",
   "cohere/command-a", "amazon/nova-premier-v1", "baidu/ernie-4.5-300b-a47b",
   "z-ai/glm-5.1", "qwen/qwen3.6-plus",
   "openai/gpt-5.4", "openai/gpt-5.4-pro", "openai/gpt-5.4-mini", "openai/gpt-5.4-nano",
   "openai/gpt-5-image", "openai/gpt-5-image-mini",
   "google/gemini-3.1-flash-image-preview", "google/gemini-3-pro-image-preview", "google/gemini-2.5-flash-image",
 ];
+
+// OpenRouter models that support reasoning via { reasoning: { enabled: true } }
+const OPENROUTER_THINKING_BASE = [
+  "anthropic/claude-opus-4.6",
+  "anthropic/claude-opus-4.7",
+];
+const OPENROUTER_THINKING_MODELS: string[] = OPENROUTER_THINKING_BASE.flatMap((id) => [
+  `${id}-thinking`,
+  `${id}-thinking-visible`,
+]);
 
 const OPENAI_MODELS = OPENAI_CHAT_MODELS.map((id) => ({ id, description: "OpenAI model" }));
 const CLAUDE_MODELS = ANTHROPIC_BASE_MODELS.flatMap((id) => [
@@ -63,6 +74,7 @@ const ALL_MODELS = [
     { id }, { id: `${id}-thinking` }, { id: `${id}-thinking-visible` },
   ]),
   ...OPENROUTER_FEATURED.map((id) => ({ id })),
+  ...OPENROUTER_THINKING_MODELS.map((id) => ({ id })),
 ];
 
 // ---------------------------------------------------------------------------
@@ -115,6 +127,7 @@ for (const base of GEMINI_BASE_MODELS) {
   MODEL_PROVIDER_MAP.set(`${base}-thinking-visible`, "gemini");
 }
 for (const id of OPENROUTER_FEATURED) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
+for (const id of OPENROUTER_THINKING_MODELS) { MODEL_PROVIDER_MAP.set(id, "openrouter"); }
 
 let disabledModels: Set<string> = new Set<string>();
 
@@ -804,8 +817,15 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
             : selectedModel;
         result = await handleGemini({ req, res, model: actualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, thinking: thinkingEnabled, thinkingVisible, startTime });
       } else if (isOpenRouterModel) {
+        const orThinkingVisible = selectedModel.endsWith("-thinking-visible");
+        const orThinkingEnabled = orThinkingVisible || selectedModel.endsWith("-thinking");
+        const orActualModel = orThinkingVisible
+          ? selectedModel.replace(/-thinking-visible$/, "")
+          : orThinkingEnabled
+            ? selectedModel.replace(/-thinking$/, "")
+            : selectedModel;
         const client = makeLocalOpenRouter();
-        result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
+        result = await handleOpenAI({ req, res, client, model: orActualModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime, reasoning: orThinkingEnabled ? { enabled: true } : undefined, thinkingVisible: orThinkingVisible });
       } else {
         const client = makeLocalOpenAI();
         result = await handleOpenAI({ req, res, client, model: selectedModel, messages: finalMessages, stream: shouldStream, maxTokens: max_tokens, tools, toolChoice: tool_choice, startTime });
@@ -1354,7 +1374,7 @@ async function handleFriendProxy({
 }
 
 async function handleOpenAI({
-  req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime,
+  req, res, client, model, messages, stream, maxTokens, tools, toolChoice, startTime, reasoning, thinkingVisible,
 }: {
   req: Request;
   res: Response;
@@ -1366,6 +1386,8 @@ async function handleOpenAI({
   tools?: OAITool[];
   toolChoice?: unknown;
   startTime: number;
+  reasoning?: { enabled: boolean };
+  thinkingVisible?: boolean;
 }): Promise<{ promptTokens: number; completionTokens: number; ttftMs?: number }> {
   const params: Parameters<typeof client.chat.completions.create>[0] = {
     model,
@@ -1375,6 +1397,7 @@ async function handleOpenAI({
   if (maxTokens) (params as Record<string, unknown>)["max_completion_tokens"] = maxTokens;
   if (tools?.length) (params as Record<string, unknown>)["tools"] = tools;
   if (toolChoice !== undefined) (params as Record<string, unknown>)["tool_choice"] = toolChoice;
+  if (reasoning) (params as Record<string, unknown>)["reasoning"] = reasoning;
 
   if (stream) {
     try {
@@ -1388,12 +1411,23 @@ async function handleOpenAI({
         stream_options: { include_usage: true },
       });
       for await (const chunk of streamResult) {
-        if (ttftMs === undefined && (chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.delta?.tool_calls)) {
+        const delta = chunk.choices?.[0]?.delta as Record<string, unknown> | undefined;
+        if (ttftMs === undefined && (delta?.content || (delta as Record<string, unknown> | undefined)?.tool_calls)) {
           ttftMs = Date.now() - startTime;
         }
         if (chunk.usage) {
           promptTokens = chunk.usage.prompt_tokens ?? 0;
           completionTokens = chunk.usage.completion_tokens ?? 0;
+        }
+        // OpenRouter returns reasoning content in delta.reasoning — remap to reasoning_content
+        const orReasoning = delta?.reasoning as string | undefined;
+        if (orReasoning) {
+          if (thinkingVisible) {
+            const reasoningChunk = { ...chunk, choices: [{ ...chunk.choices?.[0], delta: { reasoning_content: orReasoning } }] };
+            writeAndFlush(res, `data: ${JSON.stringify(reasoningChunk)}\n\n`);
+          }
+          // skip the raw reasoning chunk from being forwarded as-is
+          continue;
         }
         writeAndFlush(res, `data: ${JSON.stringify(chunk)}\n\n`);
       }
@@ -1408,6 +1442,25 @@ async function handleOpenAI({
     }
   } else {
     const result = await client.chat.completions.create({ ...params, stream: false });
+    const resultRecord = result as unknown as Record<string, unknown>;
+    // OpenRouter non-stream: remap reasoning to reasoning_content for -thinking-visible
+    if (thinkingVisible) {
+      const choices = (resultRecord.choices as Array<Record<string, unknown>> | undefined) ?? [];
+      for (const choice of choices) {
+        const msg = choice.message as Record<string, unknown> | undefined;
+        if (msg && msg.reasoning) {
+          msg.reasoning_content = msg.reasoning;
+          delete msg.reasoning;
+        }
+      }
+    } else if (reasoning) {
+      // -thinking (hidden): strip reasoning from response
+      const choices = (resultRecord.choices as Array<Record<string, unknown>> | undefined) ?? [];
+      for (const choice of choices) {
+        const msg = choice.message as Record<string, unknown> | undefined;
+        if (msg) delete msg.reasoning;
+      }
+    }
     res.json(result);
     return {
       promptTokens: result.usage?.prompt_tokens ?? 0,
