@@ -39,6 +39,9 @@ const OPENAI_MODELS: ModelEntry[] = [
 ];
 
 const ANTHROPIC_MODELS: ModelEntry[] = [
+  { id: "claude-opus-4-7", label: "Claude Opus 4.7", provider: "anthropic", desc: "最新旗舰推理模型", context: "200K", badge: "tools" },
+  { id: "claude-opus-4-7-thinking", label: "Claude Opus 4.7 (thinking)", provider: "anthropic", desc: "扩展思考（隐藏）", context: "200K", badge: "thinking" },
+  { id: "claude-opus-4-7-thinking-visible", label: "Claude Opus 4.7 (thinking visible)", provider: "anthropic", desc: "扩展思考（可见）", context: "200K", badge: "thinking-visible" },
   { id: "claude-opus-4-6", label: "Claude Opus 4.6", provider: "anthropic", desc: "顶级推理与智能体任务", context: "200K", badge: "tools" },
   { id: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 (thinking)", provider: "anthropic", desc: "扩展思考（隐藏）", context: "200K", badge: "thinking" },
   { id: "claude-opus-4-6-thinking-visible", label: "Claude Opus 4.6 (thinking visible)", provider: "anthropic", desc: "扩展思考（可见）", context: "200K", badge: "thinking-visible" },
