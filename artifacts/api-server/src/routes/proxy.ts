@@ -748,7 +748,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
     return;
   }
 
-  const selectedModel = model && ALL_MODELS.some((m) => m.id === model) ? model : "gpt-5.2";
+  const selectedModel = model;
   const provider = MODEL_PROVIDER_MAP.get(selectedModel) ?? "openai";
   const isClaudeModel = provider === "anthropic";
   const isGeminiModel = provider === "gemini";
