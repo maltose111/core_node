@@ -786,6 +786,7 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
           "claude-haiku-4-5": 8096,
           "claude-sonnet-4-5": 64000,
           "claude-sonnet-4-6": 64000,
+          "claude-opus-4-7": 64000,
           "claude-opus-4-1": 64000,
           "claude-opus-4-5": 64000,
           "claude-opus-4-6": 64000,
