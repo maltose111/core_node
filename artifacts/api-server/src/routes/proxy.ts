@@ -21,7 +21,7 @@ const OPENAI_THINKING_ALIASES = OPENAI_CHAT_MODELS
   .map((m) => `${m}-thinking`);
 
 const ANTHROPIC_BASE_MODELS = [
-  "claude-opus-4-7", "claude-opus-4-6", "claude-opus-4-5", "claude-opus-4-1",
+  "claude-opus-4-6", "claude-opus-4-5", "claude-opus-4-1",
   "claude-sonnet-4-6", "claude-sonnet-4-5",
   "claude-haiku-4-5",
 ];
@@ -786,7 +786,6 @@ router.post("/v1/chat/completions", requireApiKey, async (req: Request, res: Res
           "claude-haiku-4-5": 8096,
           "claude-sonnet-4-5": 64000,
           "claude-sonnet-4-6": 64000,
-          "claude-opus-4-7": 64000,
           "claude-opus-4-1": 64000,
           "claude-opus-4-5": 64000,
           "claude-opus-4-6": 64000,
